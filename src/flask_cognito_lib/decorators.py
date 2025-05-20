@@ -38,24 +38,22 @@ def validate_and_store_tokens(
     tokens: CognitoTokenResponse,
     nonce: Optional[str] = None,
 ) -> None:
-    """Validate and store the access token and ID token (if present) in the session"""
+    """Validate the access token and ID token (if present)"""
 
     if tokens.access_token is not None:
-        # validate the JWT and get the claims
         claims = cognito_auth.verify_access_token(
             token=tokens.access_token,
             leeway=cognito_auth.cfg.cognito_expiration_leeway,
         )
-        session.update({"claims": claims})
+        request.cognito_claims = claims
 
-    # Grab the user info from the user endpoint and store in the session
     if tokens.id_token is not None:
         user_info = cognito_auth.verify_id_token(
             token=tokens.id_token,
             nonce=nonce,
             leeway=cognito_auth.cfg.cognito_expiration_leeway,
         )
-        session.update({"user_info": user_info})
+        request.cognito_user_info = user_info
 
 
 def store_token_in_cookie(
@@ -158,18 +156,11 @@ def cognito_login_callback(fn):
                 code_verifier=code_verifier,
             )
 
-            # Store the tokens in the session
+            # Validate the tokens
             validate_and_store_tokens(tokens=tokens, nonce=nonce)
 
             # Remove one-time use variables now we have completed the auth flow
-            remove_from_session(("code_challenge", "code_verifier", "nonce"))
-
-            # split out the random part of the state value (in case the user
-            # specified their own custom state value)
-            state = session.get("state", None)
-            if state is not None:
-                state = state.split("__")[-1]
-                session.update({"state": state})
+            session.clear()
 
             # return and set the JWT as a http only cookie
             resp = fn(*args, **kwargs)
@@ -282,8 +273,6 @@ def cognito_logout(fn):
                     domain=cognito_auth.cfg.cookie_domain,
                 )
 
-            remove_from_session(("claims", "user_info"))
-
         # Cognito will redirect to the sign-out URL (if set) or else use
         # the callback URL
         return resp
@@ -319,14 +308,19 @@ def auth_required(groups: Optional[Iterable[str]] = None, any_group: bool = Fals
                         leeway=cognito_auth.cfg.cognito_expiration_leeway,
                     )
 
-                    # Check for token consistency
-                    if claims["sub"] != session["claims"]["sub"]:
-                        raise TokenVerifyError
+                    id_token = request.cookies.get(cognito_auth.cfg.COOKIE_NAME_ID)
+                    user_info = cognito_auth.verify_id_token(
+                        token=id_token,
+                        leeway=cognito_auth.cfg.cognito_expiration_leeway,
+                    )
 
                     # Check for required group membership
                     if groups:
                         if not check_group_membership(claims, groups, any_group):
                             raise CognitoGroupRequiredError
+                    
+                    request.cognito_claims = claims
+                    request.cognito_user_info = user_info
 
                     return fn(*args, **kwargs)
 
